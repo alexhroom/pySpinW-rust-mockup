@@ -1,58 +1,166 @@
+use std::f64::consts::PI;
+use std::{iter::zip, ops::Sub};
+
+use nalgebra::{stack, DMatrix, DVector, Matrix3, Vector3};
+use num_complex::Complex;
+use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;
-use nalgebra::*;
+
+type C64 = Complex<f64>;
 
 /// Temporary description of the coupling between atoms.
 #[pyclass]
 struct Coupling {
     index1: usize,
     index2: usize,
-    matrix: Matrix3x3<f64>,
-    inter_site_vector: Vec<f64> 
+    matrix: Vec<Vec<C64>>,
+    inter_site_vector: Vec<f64>,
+}
+
+static J: C64 = Complex::new(0., 1.);
+
+#[pyfunction]
+fn spinwave_calculation(
+    rotations: Vec<PyReadonlyArray1<C64>>,
+    magnitudes: Vec<f64>,
+    q_vectors: Vec<Vec<f64>>,
+    couplings: Vec<Coupling>,
+) -> Vec<Vec<C64>> {
+
+    // convert PyO3-friendly types to nalgebra ones where needed
+    let r: Vec<Matrix3<C64>> = rotations.into_iter().map(|m| m.try_as_matrix().unwrap()).collect();
+    let qv = q_vectors.into_iter().map(|v| Vector3::from_vec(v)).collect();
+
+    _calc_spinwave(r, magnitudes, qv, c)
 }
 
 /// Run the main calculation step for a spinwave calculation.
-#[pyfunction]
-fn pyo3_spinwave_calculation(rotations: , magnitudes:, q_vectors:, couplings: ) -> PyResult<Vec<f64>> {
-    todo!() 
-}
-
 #[allow(non_snake_case)]
-fn spinwave_calculation(rotations: Vec<Matrix3<f64>>, magnitudes: Vec<f64>, q_vectors: Vec<Vector3<f64>>, couplings: Vec<Coupling>) -> Vec<Vec<f64>> {
+fn _calc_spinwave(
+    rotations: Vec<Matrix3<C64>>,
+    magnitudes: Vec<f64>,
+    q_vectors: Vec<Vector3<f64>>,
+    couplings: Vec<Coupling>,
+) -> Vec<Vec<C64>> {
     let n_sites = rotations.len();
 
     // in the notation of Petit (2011)
     // eta[i] is the direction of the i'th moment in Cartesian coordinates
-    let z = Complex {re: _get_rotation_component(&rotations, 0), im: _get_rotation_component(&rotations, 1)};
+    let z = zip(
+        _get_rotation_component(&rotations, 0),
+        _get_rotation_component(&rotations, 1),
+    )
+    .map(|(r1, r2)| r1 + (r2 * J))
+    .collect();
     let eta = _get_rotation_component(&rotations, 2);
 
     // make spin coefficients array
     // so spin_coefficients[i, j] = sqrt(S_i S_j) / 2
-    let root_mags = DVector::<f64>::from_iterator(n_sites, magnitudes.into_iter().map(|x| (0.5*x).sqrt()));
-    let spin_coefficients = (root_mags * root_mags.transpose()).transpose();
+    let root_mags = DVector::<C64>::from_iterator(
+        n_sites,
+        magnitudes.iter().map(|x| Complex::from((0.5 * x).sqrt())),
+    );
+    let spin_coefficients = (root_mags.clone() * root_mags.transpose()).transpose();
 
-    let mut C = DMatrix::<f64>::zeros(n_sites, n_sites);
-    for coupling in couplings {
-        let j = coupling.index2;
-        for l in 0..n_sites {
-            C[(j, j)] += spin_coefficients[(l, l)] * eta[]
+    // create matrix C which is q-independent
+    //
+    // C_jj is the sum of eta_j^T * M * S_l eta_l over l
+    // where M is the coupling matrix and S_i is the i'th spin
+    // and we factor the l-dependent part out into `sites_term`
+    // to avoid recalculating it for every coupling
+    let sites_term: Vector3<C64> = zip(magnitudes, eta.clone())
+        .map(|(m, e)| e * Complex::from(m))
+        .sum::<Vector3<C64>>();
+    let mut C = DMatrix::<C64>::zeros(n_sites, n_sites);
+    for c in &couplings {
+        *C.index_mut((c.index2, c.index2)) +=
+            (eta[c.index2].transpose() * c.matrix * sites_term).into_scalar()
+    }
+
+    q_vectors
+        .into_iter()
+        .map(|q| _spinwave_single_q(q, &C, n_sites, &z, &spin_coefficients, &couplings))
+        .collect()
+}
+
+/// Calculate spectra for a single q-value.
+#[allow(non_snake_case)]
+fn _spinwave_single_q(
+    q: Vector3<f64>,
+    C: &DMatrix<C64>,
+    n_sites: usize,
+    z: &Vec<Vector3<C64>>,
+    spin_coefficients: &DMatrix<C64>,
+    couplings: &[Coupling],
+) -> Vec<C64> {
+    // create A and B matrices for the Hamiltonian
+    let mut A = DMatrix::<C64>::zeros(n_sites, n_sites);
+    let mut B = DMatrix::<C64>::zeros(n_sites, n_sites);
+
+    for c in couplings {
+        let phase_factor = (2. * J * PI) * q.dot(&c.inter_site_vector);
+        let (i, j) = (c.index1, c.index2);
+
+        *A.index_mut((i, j)) +=
+            (z[i].transpose() * c.matrix * z[j].conjugate()).into_scalar() * phase_factor;
+        *B.index_mut((i, j)) += (z[i].transpose() * c.matrix * z[j]).into_scalar() * phase_factor;
+    }
+
+    A *= spin_coefficients;
+    B *= spin_coefficients;
+
+    // create Hamiltonian as a block matrix (the stack! macro creates a block matrix)
+    let A_minus_C: DMatrix<C64> = A.clone().sub(C);
+    let A_conj_minus_C: DMatrix<C64> = A.adjoint().sub(C);
+    let hamiltonian: DMatrix<C64> = stack![ A_minus_C, B; 
+                                            B.adjoint(), A_conj_minus_C];
+
+    // try to take square root of Hamiltonian with Cholesky; if it fails, use LDL
+    let sqrt_hamiltonian = {
+        match hamiltonian.cholesky() {
+            Some(m) => m.l(),
+            None => panic!(), // hamiltonian.ldl().unwrap().l
         }
     };
 
-    q_vectors.into_iter().map(|q| _spinwave_single_q(q, &C, &z, &spin_coefficients, &couplings)).collect() 
-} 
+    // 'shc' is "square root of Hamiltonian with commutation"
+    // We need to enforce the bosonic commutation properties, we do this
+    // by finding the 'square root' of the matrix (i.e. finding K such that KK^dagger = H)
+    // and then negating the second half.
+    //
+    // In matrix form we do
+    //
+    //     M = K^dagger g K
+    //
+    // where g is a diagonal matrix of length 2n, with the first n entries being 1, and the
+    // remaining entries being -1.
+    let mut shc: DMatrix<C64> = sqrt_hamiltonian.clone();
+    let g = DMatrix::from_diagonal(&DVector::from_iterator(
+        shc.ncols(),
+        (0..shc.ncols()).map(|x| {
+            if x < n_sites {
+                Complex::from(1.)
+            } else {
+                Complex::from(-1.)
+            }
+        }),
+    ));
+    shc *= g;
 
-#[allow(non_snake_case)]
-fn _spinwave_single_q(q: Vector3<f64>, C: &DMatrix<f64>, z: &Complex<MatrixXx3<f64>>, spin_coefficients: &DMatrix<f64>, couplings: &Vec<Coupling>) -> Vec<f64>{
-    todo!()
+    match (shc.adjoint() * sqrt_hamiltonian).eigenvalues() {
+        Some(v) => v.data.into(),
+        None => panic!(),
+    }
 }
 
-fn _get_rotation_component(rotations: &Vec<Matrix3<f64>>, index: usize) -> MatrixXx3<f64> {
-
+/// Get the component of the rotation matrix for the axis indexed by `index`.
+fn _get_rotation_component(rotations: &Vec<Matrix3<C64>>, index: usize) -> Vec<Vector3<C64>> {
+    rotations.iter().map(|r| r.row(index).transpose()).collect()
 }
 
 /// A Python module implemented in Rust.
 #[pymodule]
-fn pyspinw(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(pyo3_spinwave_calculation, m)?)?;
+fn pyspinw(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(spinwave_calculation, m)?)?;
     Ok(())
 }
