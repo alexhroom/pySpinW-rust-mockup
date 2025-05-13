@@ -163,3 +163,7 @@ cython_debug/
 
 # direnv
 .envrc
+
+# Rust ignores
+/target/
+Cargo.lock
