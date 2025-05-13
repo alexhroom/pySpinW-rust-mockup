@@ -1,9 +1,10 @@
 use std::f64::consts::PI;
 use std::{iter::zip, ops::Sub};
 
-use nalgebra::{stack, DMatrix, DVector, DMatrixView, Matrix3, Vector3};
+use nalgebra::{stack, DMatrix, DVector, DMatrixView, Matrix3, Vector3, Const, Dyn};
 use num_complex::Complex;
-use numpy::{PyReadwriteArray2, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyReadwriteArray2, PyReadonlyArray1, PyReadonlyArray2, ToPyArray, PyArray1};
+use numpy::ndarray::Ix1;
 use pyo3::prelude::*;
 
 type C64 = Complex<f64>;
@@ -24,8 +25,8 @@ impl Coupling {
         Coupling {
             index1,
             index2,
-            matrix: { let mv: DMatrixView<C64> = matrix.try_as_matrix().unwrap(); mv.fixed_resize::<3, 3>(Complex::from(0.)) },
-            inter_site_vector: { let isv: DMatrixView<f64> = inter_site_vector.try_as_matrix().unwrap(); isv.fixed_resize::<3, 1>(0.)} 
+            matrix: matrix.try_as_matrix::<Const<3>, Const<3>, Dyn, Dyn>().unwrap().into(),
+            inter_site_vector: inter_site_vector.try_as_matrix::<Const<3>, Const<1>, Dyn, Dyn>().unwrap().into()
         }    
     }
 }
@@ -33,12 +34,13 @@ impl Coupling {
 static J: C64 = Complex::new(0., 1.);
 
 #[pyfunction]
-pub fn spinwave_calculation(
+pub fn spinwave_calculation<'py>(
+    py: Python<'py>,
     rotations: Vec<PyReadwriteArray2<C64>>,
     magnitudes: Vec<f64>,
     q_vectors: Vec<Vec<f64>>,
     couplings: Vec<Py<Coupling>>,
-) -> Vec<Vec<C64>> {
+) -> PyResult<Vec<Bound<'py, PyArray1<C64>>>> {
     // convert PyO3-friendly types to nalgebra ones where needed
     let r: Vec<Matrix3<C64>> = rotations
         .into_iter()
@@ -51,7 +53,8 @@ pub fn spinwave_calculation(
 
     let c = couplings.iter().map(|cp| cp.get()).collect();
 
-    _calc_spinwave(r, magnitudes, qv, c)
+    let energies = _calc_spinwave(r, magnitudes, qv, c);
+    Ok(energies.into_iter().map(|v| v.to_pyarray(py)).collect())
 }
 
 /// Run the main calculation step for a spinwave calculation.
