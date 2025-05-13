@@ -1,35 +1,55 @@
 use std::f64::consts::PI;
 use std::{iter::zip, ops::Sub};
 
-use nalgebra::{stack, DMatrix, DVector, Matrix3, Vector3};
+use nalgebra::{stack, DMatrix, DVector, DMatrixView, Matrix3, Vector3};
 use num_complex::Complex;
-use numpy::PyReadonlyArray1;
+use numpy::{PyReadwriteArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
 type C64 = Complex<f64>;
 
 /// Temporary description of the coupling between atoms.
-#[pyclass]
-struct Coupling {
+#[pyclass(frozen)]
+pub struct Coupling {
     index1: usize,
     index2: usize,
-    matrix: Vec<Vec<C64>>,
-    inter_site_vector: Vec<f64>,
+    matrix: Matrix3<C64>,
+    inter_site_vector: Vector3<f64>,
+}
+
+#[pymethods]
+impl Coupling {
+    #[new]
+    fn new(index1: usize, index2: usize, matrix: PyReadonlyArray2<C64>, inter_site_vector: PyReadonlyArray1<f64>) -> Self {
+        Coupling {
+            index1,
+            index2,
+            matrix: { let mv: DMatrixView<C64> = matrix.try_as_matrix().unwrap(); mv.fixed_resize::<3, 3>(Complex::from(0.)) },
+            inter_site_vector: { let isv: DMatrixView<f64> = inter_site_vector.try_as_matrix().unwrap(); isv.fixed_resize::<3, 1>(0.)} 
+        }    
+    }
 }
 
 static J: C64 = Complex::new(0., 1.);
 
 #[pyfunction]
-fn spinwave_calculation(
-    rotations: Vec<PyReadonlyArray1<C64>>,
+pub fn spinwave_calculation(
+    rotations: Vec<PyReadwriteArray2<C64>>,
     magnitudes: Vec<f64>,
     q_vectors: Vec<Vec<f64>>,
-    couplings: Vec<Coupling>,
+    couplings: Vec<Py<Coupling>>,
 ) -> Vec<Vec<C64>> {
-
     // convert PyO3-friendly types to nalgebra ones where needed
-    let r: Vec<Matrix3<C64>> = rotations.into_iter().map(|m| m.try_as_matrix().unwrap()).collect();
-    let qv = q_vectors.into_iter().map(|v| Vector3::from_vec(v)).collect();
+    let r: Vec<Matrix3<C64>> = rotations
+        .into_iter()
+        .map(|m| -> Matrix3<C64> { let mv: DMatrixView<C64> = m.try_as_matrix().unwrap(); mv.fixed_resize::<3, 3>(Complex::from(0.)) })
+        .collect();
+    let qv = q_vectors
+        .into_iter()
+        .map(|v| Vector3::from_vec(v))
+        .collect();
+
+    let c = couplings.iter().map(|cp| cp.get()).collect();
 
     _calc_spinwave(r, magnitudes, qv, c)
 }
@@ -40,7 +60,7 @@ fn _calc_spinwave(
     rotations: Vec<Matrix3<C64>>,
     magnitudes: Vec<f64>,
     q_vectors: Vec<Vector3<f64>>,
-    couplings: Vec<Coupling>,
+    couplings: Vec<&Coupling>,
 ) -> Vec<Vec<C64>> {
     let n_sites = rotations.len();
 
@@ -79,7 +99,7 @@ fn _calc_spinwave(
 
     q_vectors
         .into_iter()
-        .map(|q| _spinwave_single_q(q, &C, n_sites, &z, &spin_coefficients, &couplings))
+        .map(|q| _spinwave_single_q(q, &C, n_sites, &z, &spin_coefficients, couplings.clone()))
         .collect()
 }
 
@@ -91,7 +111,7 @@ fn _spinwave_single_q(
     n_sites: usize,
     z: &Vec<Vector3<C64>>,
     spin_coefficients: &DMatrix<C64>,
-    couplings: &[Coupling],
+    couplings: Vec<&Coupling>,
 ) -> Vec<C64> {
     // create A and B matrices for the Hamiltonian
     let mut A = DMatrix::<C64>::zeros(n_sites, n_sites);
@@ -160,7 +180,8 @@ fn _get_rotation_component(rotations: &Vec<Matrix3<C64>>, index: usize) -> Vec<V
 
 /// A Python module implemented in Rust.
 #[pymodule]
-fn pyspinw(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(spinwave_calculation, m)?)?;
+    m.add_class::<Coupling>()?;
     Ok(())
 }

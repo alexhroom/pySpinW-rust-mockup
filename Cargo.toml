@@ -5,12 +5,11 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "pyspinw"
+name = "rust"
 crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = {version="0.24.2", features=["num-complex"]}
 numpy = {version="0.24.0", features=["nalgebra"]}
-# change this for new version when LDL is implemented properly
-nalgebra = {git = "https://github.com/ajefweiss/nalgebra.git", rev = "b8759354eafd1bd22b745a5dff9d3fd50aa7c834"}
+nalgebra = "0.33.2" 
 num-complex = "0.4.6"
