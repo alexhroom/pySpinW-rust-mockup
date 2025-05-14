@@ -4,8 +4,8 @@ use std::{iter::zip, ops::Sub};
 use nalgebra::{stack, DMatrix, DVector, DMatrixView, Matrix3, Vector3, Const, Dyn};
 use num_complex::Complex;
 use numpy::{PyReadwriteArray2, PyReadonlyArray1, PyReadonlyArray2, ToPyArray, PyArray1};
-use numpy::ndarray::Ix1;
 use pyo3::prelude::*;
+use rayon::prelude::{ParallelIterator, IntoParallelIterator};
 
 type C64 = Complex<f64>;
 
@@ -69,7 +69,7 @@ fn _calc_spinwave(
 
     // in the notation of Petit (2011)
     // eta[i] is the direction of the i'th moment in Cartesian coordinates
-    let z = zip(
+    let z: Vec<Vector3<C64>> = zip(
         _get_rotation_component(&rotations, 0),
         _get_rotation_component(&rotations, 1),
     )
@@ -101,7 +101,7 @@ fn _calc_spinwave(
     }
 
     q_vectors
-        .into_iter()
+        .into_par_iter()
         .map(|q| _spinwave_single_q(q, &C, n_sites, &z, &spin_coefficients, couplings.clone()))
         .collect()
 }
@@ -121,22 +121,23 @@ fn _spinwave_single_q(
     let mut B = DMatrix::<C64>::zeros(n_sites, n_sites);
 
     for c in couplings {
-        let phase_factor = (2. * J * PI) * q.dot(&c.inter_site_vector);
+        let phase_factor = ((2. * J * PI) * q.dot(&c.inter_site_vector)).exp();
         let (i, j) = (c.index1, c.index2);
 
-        *A.index_mut((i, j)) +=
+        A[(i, j)] +=
             (z[i].transpose() * c.matrix * z[j].conjugate()).into_scalar() * phase_factor;
-        *B.index_mut((i, j)) += (z[i].transpose() * c.matrix * z[j]).into_scalar() * phase_factor;
+        B[(i, j)] += (z[i].transpose() * c.matrix * z[j]).into_scalar() * phase_factor;
     }
 
-    A *= spin_coefficients;
-    B *= spin_coefficients;
+    A = A.component_mul(spin_coefficients);
+    B = B.component_mul(spin_coefficients);
 
     // create Hamiltonian as a block matrix (the stack! macro creates a block matrix)
     let A_minus_C: DMatrix<C64> = A.clone().sub(C);
     let A_conj_minus_C: DMatrix<C64> = A.adjoint().sub(C);
     let hamiltonian: DMatrix<C64> = stack![ A_minus_C, B; 
                                             B.adjoint(), A_conj_minus_C];
+
 
     // try to take square root of Hamiltonian with Cholesky; if it fails, use LDL
     let sqrt_hamiltonian = {
@@ -158,16 +159,10 @@ fn _spinwave_single_q(
     // where g is a diagonal matrix of length 2n, with the first n entries being 1, and the
     // remaining entries being -1.
     let mut shc: DMatrix<C64> = sqrt_hamiltonian.clone();
-    let g = DMatrix::from_diagonal(&DVector::from_iterator(
-        shc.ncols(),
-        (0..shc.ncols()).map(|x| {
-            if x < n_sites {
-                Complex::from(1.)
-            } else {
-                Complex::from(-1.)
-            }
-        }),
-    ));
+    let negative_identity = DMatrix::<C64>::identity(n_sites, n_sites) * Complex::from(-1.);
+    let g = stack![DMatrix::<C64>::identity(n_sites, n_sites), 0;
+                   0, negative_identity];
+
     shc *= g;
 
     match (shc.adjoint() * sqrt_hamiltonian).eigenvalues() {
