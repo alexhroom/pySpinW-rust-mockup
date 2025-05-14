@@ -7,6 +7,9 @@ use numpy::{PyReadwriteArray2, PyReadonlyArray1, PyReadonlyArray2, ToPyArray, Py
 use pyo3::prelude::*;
 use rayon::prelude::{ParallelIterator, IntoParallelIterator};
 
+pub mod ldl;
+use crate::ldl::ldl;
+
 type C64 = Complex<f64>;
 
 /// Temporary description of the coupling between atoms.
@@ -141,10 +144,12 @@ fn _spinwave_single_q(
 
     // try to take square root of Hamiltonian with Cholesky; if it fails, use LDL
     let sqrt_hamiltonian = {
-        match hamiltonian.cholesky() {
-            Some(m) => m.l(),
-            None => panic!(), // hamiltonian.ldl().unwrap().l
-        }
+        let (l, d) = ldl(hamiltonian);
+        l * DMatrix::from_diagonal(&d.map(|x| x.sqrt()))
+        //match hamiltonian.cholesky() {
+        //  Some(m) => m.l(),
+        //None => panic!(), // hamiltonian.ldl().unwrap().l
+        //}
     };
 
     // 'shc' is "square root of Hamiltonian with commutation"
