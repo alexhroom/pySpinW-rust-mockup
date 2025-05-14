@@ -34,13 +34,12 @@ pub fn ldl(p: DMatrix<C64>) -> (DMatrix<C64>, DVector<C64>) {
             }
 
             if d[j] == Complex::from(0.) {
-                l[(i, j)] = Complex::from(0.) 
+                l[(i, j)] = Complex::from(0.)
             } else {
                 l[(i, j)] = l_ij / d[j].clone();
             }
         }
     }
 
-    ( l, d )
+    (l, d)
 }
-

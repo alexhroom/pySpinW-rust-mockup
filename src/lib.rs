@@ -1,11 +1,12 @@
 use std::f64::consts::PI;
 use std::{iter::zip, ops::Sub};
 
-use nalgebra::{stack, DMatrix, DVector, DMatrixView, Matrix3, Vector3, Const, Dyn};
+use nalgebra::{stack, Const, DMatrix, DMatrixView, DVector, Dyn, Matrix3, Vector3};
 use num_complex::Complex;
-use numpy::{PyReadwriteArray2, PyReadonlyArray1, PyReadonlyArray2, ToPyArray, PyArray1};
+use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray2, ToPyArray};
 use pyo3::prelude::*;
-use rayon::prelude::{ParallelIterator, IntoParallelIterator};
+use rayon::iter::IntoParallelRefIterator;
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 
 pub mod ldl;
 use crate::ldl::ldl;
@@ -24,18 +25,30 @@ pub struct Coupling {
 #[pymethods]
 impl Coupling {
     #[new]
-    fn new(index1: usize, index2: usize, matrix: PyReadonlyArray2<C64>, inter_site_vector: PyReadonlyArray1<f64>) -> Self {
+    fn new(
+        index1: usize,
+        index2: usize,
+        matrix: PyReadonlyArray2<C64>,
+        inter_site_vector: PyReadonlyArray1<f64>,
+    ) -> Self {
         Coupling {
             index1,
             index2,
-            matrix: matrix.try_as_matrix::<Const<3>, Const<3>, Dyn, Dyn>().unwrap().into(),
-            inter_site_vector: inter_site_vector.try_as_matrix::<Const<3>, Const<1>, Dyn, Dyn>().unwrap().into()
-        }    
+            matrix: matrix
+                .try_as_matrix::<Const<3>, Const<3>, Dyn, Dyn>()
+                .unwrap()
+                .into(),
+            inter_site_vector: inter_site_vector
+                .try_as_matrix::<Const<3>, Const<1>, Dyn, Dyn>()
+                .unwrap()
+                .into(),
+        }
     }
 }
 
 static J: C64 = Complex::new(0., 1.);
 
+/// Run the main calculation step for a spinwave calculation.
 #[pyfunction]
 pub fn spinwave_calculation<'py>(
     py: Python<'py>,
@@ -44,17 +57,20 @@ pub fn spinwave_calculation<'py>(
     q_vectors: Vec<Vec<f64>>,
     couplings: Vec<Py<Coupling>>,
 ) -> PyResult<Vec<Bound<'py, PyArray1<C64>>>> {
-    // convert PyO3-friendly types to nalgebra ones where needed
+    // convert PyO3-friendly array types to nalgebra matrices 
     let r: Vec<Matrix3<C64>> = rotations
         .into_iter()
-        .map(|m| -> Matrix3<C64> { let mv: DMatrixView<C64> = m.try_as_matrix().unwrap(); mv.fixed_resize::<3, 3>(Complex::from(0.)) })
+        .map(|m| -> Matrix3<C64> {
+            let mv: DMatrixView<C64> = m.try_as_matrix().unwrap();
+            mv.fixed_resize::<3, 3>(Complex::from(0.))
+        })
         .collect();
     let qv = q_vectors
-        .into_iter()
+        .into_par_iter()
         .map(|v| Vector3::from_vec(v))
         .collect();
 
-    let c = couplings.iter().map(|cp| cp.get()).collect();
+    let c = couplings.par_iter().map(|cp| cp.get()).collect();
 
     let energies = _calc_spinwave(r, magnitudes, qv, c);
     Ok(energies.into_iter().map(|v| v.to_pyarray(py)).collect())
@@ -127,8 +143,7 @@ fn _spinwave_single_q(
         let phase_factor = ((2. * J * PI) * q.dot(&c.inter_site_vector)).exp();
         let (i, j) = (c.index1, c.index2);
 
-        A[(i, j)] +=
-            (z[i].transpose() * c.matrix * z[j].conjugate()).into_scalar() * phase_factor;
+        A[(i, j)] += (z[i].transpose() * c.matrix * z[j].conjugate()).into_scalar() * phase_factor;
         B[(i, j)] += (z[i].transpose() * c.matrix * z[j]).into_scalar() * phase_factor;
     }
 
@@ -140,7 +155,6 @@ fn _spinwave_single_q(
     let A_conj_minus_C: DMatrix<C64> = A.adjoint().sub(C);
     let hamiltonian: DMatrix<C64> = stack![ A_minus_C, B; 
                                             B.adjoint(), A_conj_minus_C];
-
 
     // try to take square root of Hamiltonian with Cholesky; if it fails, use LDL
     let sqrt_hamiltonian = {
@@ -178,7 +192,7 @@ fn _spinwave_single_q(
 
 /// Get the component of the rotation matrix for the axis indexed by `index`.
 fn _get_rotation_component(rotations: &Vec<Matrix3<C64>>, index: usize) -> Vec<Vector3<C64>> {
-    rotations.iter().map(|r| r.row(index).transpose()).collect()
+    rotations.par_iter().map(|r| r.row(index).transpose()).collect()
 }
 
 /// A Python module implemented in Rust.
