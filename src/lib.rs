@@ -67,7 +67,7 @@ pub fn spinwave_calculation<'py>(
         .collect();
     let qv = q_vectors
         .into_par_iter()
-        .map(|v| Vector3::from_vec(v))
+        .map(Vector3::from_vec)
         .collect();
 
     let c = couplings.par_iter().map(|cp| cp.get()).collect();
@@ -104,7 +104,7 @@ fn _calc_spinwave(
     );
     let spin_coefficients = (root_mags.clone() * root_mags.transpose()).transpose();
 
-    // create matrix C which is q-independent
+    // create matrix C of Hamiltonian which is q-independent
     //
     // C_jj is the sum of eta_j^T * M * S_l eta_l over l
     // where M is the coupling matrix and S_i is the i'th spin
@@ -116,7 +116,7 @@ fn _calc_spinwave(
     let mut C = DMatrix::<C64>::zeros(n_sites, n_sites);
     for c in &couplings {
         *C.index_mut((c.index2, c.index2)) +=
-            (eta[c.index2].transpose() * c.matrix * sites_term).into_scalar()
+            (eta[c.index2].transpose() * c.matrix * sites_term).into_scalar();
     }
 
     q_vectors
@@ -131,11 +131,12 @@ fn _spinwave_single_q(
     q: Vector3<f64>,
     C: &DMatrix<C64>,
     n_sites: usize,
-    z: &Vec<Vector3<C64>>,
+    z: &[Vector3<C64>],
     spin_coefficients: &DMatrix<C64>,
     couplings: Vec<&Coupling>,
 ) -> Vec<C64> {
     // create A and B matrices for the Hamiltonian
+
     let mut A = DMatrix::<C64>::zeros(n_sites, n_sites);
     let mut B = DMatrix::<C64>::zeros(n_sites, n_sites);
 
@@ -176,13 +177,10 @@ fn _spinwave_single_q(
     //     M = K^dagger g K
     //
     // where g is a diagonal matrix of length 2n, with the first n entries being 1, and the
-    // remaining entries being -1.
+    // remaining entries being -1. We do this by just multiplying the >n_sites columns of shc.
     let mut shc: DMatrix<C64> = sqrt_hamiltonian.clone();
-    let negative_identity = DMatrix::<C64>::identity(n_sites, n_sites) * Complex::from(-1.);
-    let g = stack![DMatrix::<C64>::identity(n_sites, n_sites), 0;
-                   0, negative_identity];
-
-    shc *= g;
+    let mut negative_half = shc.view_mut((0, n_sites), (2 * n_sites, n_sites));
+    negative_half *= Complex::from(-1.);
 
     match (shc.adjoint() * sqrt_hamiltonian).eigenvalues() {
         Some(v) => v.data.into(),
